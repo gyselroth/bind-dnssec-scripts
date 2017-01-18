@@ -1,0 +1,101 @@
+#!/bin/bash
+#   
+# Sign DNSSEC zone
+#
+# This script will sign a DNSSEC zone with its corresponding key in the keydirectory.
+# At wish, the zone serial can be increased persistently.
+#
+# @example
+# ./signZone gyselroth.com inc
+#
+# This will increase the serial number of the zone by one, if the old serial has the 
+# same date, or set it to the first serial of todays date. After that it will look 
+# for keys corresponding to the zone gyselroth.com in the configurable keydirectory
+# and sign it. 
+#
+# @author Fabian Jucker <jucker@gyselroth.com>
+#
+
+namedConf="/etc/bind/named.conf.local"
+keyDir="/etc/bind/master/keys"
+
+function usage {
+    echo "Usage: $0 zonename [inc]"
+    exit 1
+}
+
+function error {
+    echo "Error - $1"
+    exit 2
+}
+
+function parseParam {
+    zone=$1
+    lines=`grep -E "zone .$zone|/$zone" $namedConf`
+    linesCount=`grep -E "zone .$zone|/$zone" $namedConf -c`
+    case $linesCount in
+        0)
+            error "No zone '$zone' found in '$namedConf'"
+            ;;
+        1)
+            error "No zonefile for '$zone' found in '$namedConf'"
+            ;;
+        2)
+            zonePathFull=$(echo $lines | cut -d '"' -f4) 
+            zoneFileUnsigned=$(basename -s .signed $zonePathFull)
+            zonePathDir=$(dirname $zonePathFull)
+            if [ "$2" == "inc" ]
+            then
+                increaseSerial "$zonePathDir/$zoneFileUnsigned"
+            fi
+            signZone $zone "$zonePathDir/$zoneFileUnsigned" $zonePathDir
+            ;;
+        *)
+            error "Unknown error - zone: '$zone' - named.conf: '$namedConf'"
+            ;;
+    esac
+}
+
+function signZone {
+    currentDir=$(pwd)
+    cd $3
+    /usr/sbin/dnssec-signzone -S -K ${keyDir} -3 $(head -c 1000 /dev/urandom | sha1sum | cut -b 1-16) -o ${1} -N keep ${2}
+    cd $currentDir
+}
+
+function increaseSerial {
+    oldSerial=$(grep -E "[0-9]{10} ; serial" $1 | awk '{ print $1 }' )
+    oldDate=$(echo $oldSerial | cut -c 1-8)
+    newDate=$(date +%Y%m%d)
+    if [ $newDate -gt $oldDate ]
+    then
+        newSerial="${newDate}01"
+    else
+        oldSeq=$(echo $oldSerial | cut -c 9-10)
+        newSeq=$(expr $oldSeq + 1)
+        if [ $newSeq -gt 99 ]
+        then
+            error "Zone serial $oldSerial is at maximum"
+        fi
+        if [ $newSeq -lt 10 ]
+        then
+            newSeq="0${newSeq}"
+        fi
+        newSerial="${newDate}${newSeq}"
+    fi
+    sed -ri "s/[0-9]{10} ; serial/$newSerial ; serial/g" $1
+}
+
+if [ $# -gt 2 ]
+then
+    usage
+fi
+
+if [ $(id -u) -ne 0 ] 
+then
+    error "Root privileges required"
+fi
+parseParam $*
+
+
+

@@ -1,0 +1,115 @@
+#!/bin/bash
+#   
+# Rollover DNSSEC Zone-Signing-Key
+#
+# @example
+# ./rolloverZSK gyselroth.com
+#
+# Rolls over to a new ZSK for a zone.
+# Prerequisites:    - all keys have to be in one folder ($keyDir).
+#                   - for every zone there have to exist three ZSK-sets, a retired one (the one used before the current one), a current one (the one currently used) and a next one (the one to be used after the current one)
+#                   - /usr/local/sbin/signZone script
+#
+# @author Fabian Jucker <jucker@gyselroth.com>
+#
+
+namedConf="/etc/bind/named.conf.local"
+keyDir="/etc/bind/master/keys"
+zoneDir="/etc/bind/master"
+
+newKey=""
+zone=""
+
+function usage {
+    echo "Usage: $0 zonename"
+    exit 1
+}
+
+function error {
+    echo "Error - $1"
+    exit 2
+}
+
+function parseParam {
+    zone=$1
+    lines=`grep -E "zone .$zone|/$zone" $namedConf`
+    linesCount=`grep -E "zone .$zone|/$zone" $namedConf -c`
+    case $linesCount in
+        0)
+            error "No zone '$zone' found in '$namedConf'"
+            ;;
+        1)
+            error "No zonefile for '$zone' found in '$namedConf'"
+            ;;
+        2)  
+            ;;
+        *)
+            error "Unknown error - zone: '$zone' - named.conf: '$namedConf'"
+            ;;
+    esac
+}
+
+
+function generateNewKey {
+    publication=`date +%Y%m%d`
+    activation=`date -d "+1 month" +%Y%m%d`
+    inactivation=`date -d "+2 month" +%Y%m%d`
+    deletion=`date -d "+3 month" +%Y%m%d`
+
+    newKey=`dnssec-keygen -a NSEC3RSASHA1 -b 2048 -n ZONE \
+    -K ${keyDir} \
+    -P ${publication} \
+    -A ${activation} \
+    -I ${inactivation} \
+    -D ${deletion} \
+    ${zone}`
+}
+
+function rollKeys {
+    if [ "$newKey" == "" ]
+    then
+        error "No next key '$newKey' found in '$keyDir'"
+    fi
+
+    # delete old key, if there is one
+    if [ -f ${keyDir}/K${zone}.+ZSK+retired.key ]
+    then
+        rm ${keyDir}/K${zone}.+ZSK+retired.*
+    fi
+
+    # current => old, next => current, if there is a next key
+    if [ -f ${keyDir}/K${zone}.+ZSK+next.key ]
+    then
+        mv ${keyDir}/K${zone}.+ZSK+current.key     ${keyDir}/K${zone}.+ZSK+retired.key
+        mv ${keyDir}/K${zone}.+ZSK+current.private ${keyDir}/K${zone}.+ZSK+retired.private
+
+        mv ${keyDir}/K${zone}.+ZSK+next.key        ${keyDir}/K${zone}.+ZSK+current.key
+        mv ${keyDir}/K${zone}.+ZSK+next.private    ${keyDir}/K${zone}.+ZSK+current.private
+    fi
+
+    # new key => next
+    ln -s ${newKey}.key     ${keyDir}/K${zone}.+ZSK+next.key
+    ln -s ${newKey}.private ${keyDir}/K${zone}.+ZSK+next.private
+}
+
+function main {
+    if [ $# -ne 1 ] 
+    then
+        usage
+    fi
+
+    if [ $(id -u) -ne 0 ]
+    then
+        error "Root privileges required"
+    fi
+
+    parseParam $1
+    generateNewKey
+    rollKeys
+
+#    dnssec-signzone -S -K ${keyDir} -o ${zone} -N increment ${zoneDir}/${zone}.dns
+    /usr/local/sbin/signZone $zone inc
+    rndc reload ${zone}
+}
+
+main $*
